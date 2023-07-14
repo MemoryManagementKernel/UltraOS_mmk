@@ -1,17 +1,9 @@
 #![no_std]
 #![no_main]
-#![feature(global_asm)]
-#![feature(llvm_asm)]
-#![feature(asm)]
+
+
 #![feature(panic_info_message)]
 #![feature(alloc_error_handler)]
-
-use lazy_static::lazy_static;
-use sbi::sbi_send_ipi;
-use spin::*;
-use timer::get_timeval;
-use syscall::*;
-use alloc::sync::Arc;
 
 extern crate alloc;
 
@@ -19,41 +11,38 @@ extern crate alloc;
 extern crate bitflags;
 
 #[macro_use]
-mod console;
+mod mmi;
 mod lang_items;
-mod sbi;
-mod syscall;
-mod trap;
-mod config;
-mod utils;
-#[macro_use]
-mod monitor;
-mod task;
-mod timer;
-mod mm;
 mod fs;
+mod console;
+
+#[macro_use]
+mod util;
+mod os_trap;
+mod syscall;
 mod drivers;
+mod task;
+
+mod timer;
+mod heap_allocator;
+mod config;
+
+use core::arch::global_asm;
+use lazy_static::lazy_static;
+use riscv::register::satp;
+use sbi::sbi_send_ipi;
+use spin::*;
+use alloc::sync::Arc;
+use mmi::*;
+use util::*;
+use config::*;
+pub use os_trap::*;
 
 global_asm!(include_str!("entry.asm"));
 global_asm!(include_str!("start_app.S"));
 
-fn clear_bss() {
-    extern "C" {
-        fn sbss();
-        fn ebss();
-    }
-    (sbss as usize..ebss as usize).for_each(|a| {
-        unsafe { (a as *mut u8).write_volatile(0) }
-    });
-}
+use crate::heap_allocator::init_heap;
 
-pub fn id() -> usize {
-    let cpu_id;
-    unsafe {
-        llvm_asm!("mv $0, tp" : "=r"(cpu_id));
-    }
-    cpu_id
-}
 
 pub const SYSCALL_GETPPID:usize = 173;
 pub fn test() {
@@ -62,7 +51,9 @@ pub fn test() {
     //     syscall(SYSCALL_GETPPID,[0,0,0,0,0,0]);
     // }
     // let end = get_timeval();
-    // println!("test: run sys_getppid 100000000 times, spent {:?}",end-start);
+    // debug_os!("test: run sys_getppid 100000000 times, spent {:?}",end-start);
+
+    
 }
 
 struct Core2flag{
@@ -87,43 +78,65 @@ lazy_static! {
     ));
 }
 
+extern "C"{
+    fn eokernel();
+}
+
 #[no_mangle]
-pub fn rust_main() -> ! {
-    let core = id();
-    // println!("core {} is running",core);
-    if core != 0 {
-        loop{}
-        /// WARNING: Multicore mode only supports customized RustSBI platform, especially not including OpenSBI
-        /// We use OpenSBI in qemu and customized RustSBI in k210, if you want to try Multicore mode, you have to
-        /// try to switch to RustSBI in qemu and try to wakeup, which needs some effort and you can refer to docs.
-        // while !CORE2_FLAG.lock().is_in(){}
-        mm::init_othercore();
-        println!("other core start");
-        trap::init();
-        trap::enable_timer_interrupt();
-        timer::set_next_trigger();
-        println!("other core start run tasks");
-        task::run_tasks();
-        panic!("Unreachable in rust_main!");
+pub fn outer_kernel_init(){
+    debug_os!("Outer Kernel init.");
+    
+    //temoraily have to add to make program run. only for test.
+    nkapi_set_delegate_handler(os_trap::trap_handler_delegate as usize);
+    nkapi_set_signal_handler(crate::task::perform_signal_handler as usize);
+    nkapi_set_allocator_range(eokernel as usize, OKSPACE_END);
+    debug_os!("UltraOS: Config success.");
+    init_heap();
+    debug_os!("Heap init success.");
+    KERNEL_SPACE.lock();
+    //nkapi_gatetest();
+    //mem_access_timecost();
+    
+    extern "C"{
+        fn sokheap();
     }
-    clear_bss();
-    mm::init();
-    mm::remap_test();
-    println!("UltraOS: memory initialized");
-    trap::init();
-    trap::enable_timer_interrupt();
+    
+    debug_os!("UltraOS: static struct initialized");
+
     timer::set_next_trigger();
-    println!("UltraOS: interrupt initialized");
+    debug_os!("UltraOS: interrupt initialized");
+
+    // unsafe{
+    //     asm!("ecall", in("a7")9);
+    // }
+
     fs::init_rootfs();
-    println!("UltraOS: fs initialized");
+
+    debug_os!("UltraOS: fs initialized");
+
+    //unsafe { sie::set_stimer(); }
+
     task::add_initproc();
-    println!("UltraOS: task initialized");
-    println!("UltraOS: wake other cores");
+    debug_os!("UltraOS: task initialized");
+
+    debug_os!("UltraOS: wake other cores");
     let mask:usize = 1 << 1;
     sbi_send_ipi(&mask as *const usize as usize);
     // CORE2_FLAG.lock().set_in();
-    // test();
-    println!("UltraOS: run tasks");
+    //test();
+    
+    debug_os!("Outer Kernel: attack test.");
+    
+    // satp::write(0);
+
+    // nkapi_alloc(0, 0x80201.into(), 
+    // MapType::Identical, MapPermission::W);
+
+    // nkapi_alloc(0, 0x80600.into(), 
+    // MapType::Specified(0x80202.into()), MapPermission::W);
+    
+    debug_os!("UltraOS: run tasks");
+
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }

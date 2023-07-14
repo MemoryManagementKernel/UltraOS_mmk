@@ -1,37 +1,26 @@
-use core::ops::Index;
+use crate::util::MemorySet;
 
-use crate::{console::print, mm::{
-    MemorySet,
-    PhysPageNum,
-    KERNEL_SPACE, 
-    KERNEL_MMAP_AREA, 
-    //KERNEL_TOKEN,
-    //PageTable,
-    VirtAddr,
-    VirtPageNum,
-    PageTableEntry,
-    translated_refmut,
-    MmapArea,
-    MapPermission,
-    // PTEFlags,
-}, syscall::FD_LIMIT, task::RLIMIT_NOFILE};
-use crate::trap::{TrapContext, trap_handler};
-use crate::config::*;
-use crate::gdb_println;
-use crate::monitor::*;
-use crate::utils::*;
+use crate::{util::mm_util::translated_refmut, 
+syscall::sys_musl::FD_LIMIT, task::RLIMIT_NOFILE};
+
+use crate::{mmi::*, debug_info}; use crate::config::*;
+use crate::util::*;
+use crate::util::log2;
+use crate::{config::*};
+use crate::util::{KERNEL_SPACE, KERNEL_MMAP_AREA};
+use crate::TrapContext;
 use crate::timer::get_timeval;
 use super::info::*;
 use super::{RLimit, TaskContext};
 use super::{PidHandle, pid_alloc, KernelStack, RUsage, ITimerVal};
 use alloc::sync::{Weak, Arc};
-use alloc::vec;
+use alloc::{vec, task};
 use alloc::vec::Vec;
 use alloc::string::String;
 use core::fmt::{self, Debug, Formatter};
 use spin::{Mutex, MutexGuard};
 use crate::fs::{ FileDescripter, Stdin, Stdout, FileClass};
-
+use crate::debug_os;
 pub struct AuxHeader{
     pub aux_type: usize,
     pub value: usize,
@@ -97,11 +86,11 @@ impl TaskControlBlockInner {
         &self.task_cx_ptr as *const usize
     }
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
-        // println!{"trap_cx_ppn: {:X}", self.trap_cx_ppn.0}
+        // debug_os!{"trap_cx_ppn: {:X}", self.trap_cx_ppn.0}
         self.trap_cx_ppn.get_mut()
     }
-    pub fn get_user_token(&self) -> usize {
-        self.memory_set.token()
+    pub fn get_user_id(&self) -> usize {
+        self.memory_set.id()
     }
     fn get_status(&self) -> TaskStatus {
         self.task_status
@@ -120,25 +109,23 @@ impl TaskControlBlockInner {
     }
     pub fn print_cx(&self) {
         unsafe{ 
-            // println!("task_cx = {:?}", *(self.task_cx_ptr as *const TaskContext) );
-            // println!("trap_cx = {:?}", *(self.trap_cx_ppn.0 as *const TrapContext) );
+            debug_os!("task_cx = {:x}", self.task_cx_ptr );
+            debug_os!("trap_cx = {:x}", self.trap_cx_ppn.0 << 12);
         }
     }
 
     pub fn get_work_path(&self)->String{
         self.current_path.clone()
     }
-    pub fn translate_vpn(&self, vpn: VirtPageNum) -> PageTableEntry {
-        self.memory_set.translate(vpn).unwrap()
+    pub fn enquire_vpn(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+        return self.memory_set.translate(vpn);
     }
-    pub fn enquire_vpn(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        self.memory_set.translate(vpn)
-    }
-    pub fn cow_alloc(&mut self, vpn: VirtPageNum, former_ppn: PhysPageNum) -> usize {
-        let ret = self.memory_set.cow_alloc(vpn, former_ppn);
-        // println!{"finished cow_alloc!"}
-        ret
-    }
+
+    // pub fn cow_alloc(&mut self, vpn: VirtPageNum, former_ppn: PhysPageNum) -> usize {
+    //     let ret = self.memory_set.cow_alloc(vpn, former_ppn);
+    //     // debug_os!{"finished cow_alloc!"}
+    //     ret
+    // }
 
     pub fn add_signal(&mut self, signal: Signals){
         self.siginfo.signal_pending.push(signal);
@@ -158,10 +145,26 @@ impl TaskControlBlockInner {
 }
 
 
+pub fn test_in_usr(){
+    debug_os!("Test code in user.");
+
+    unsafe{
+        let mut satp: usize = 0;
+        core::arch::asm!("csrr {0}, satp", 
+                        out(reg) satp);
+        debug_os!("current satp: {:x}", satp);
+        for i in 0..100{
+            nkapi_set_permission(1, 0.into(), (MapPermission::R | 
+                MapPermission::W | MapPermission::X | MapPermission::U).bits().into());
+            let aa = *(i as *const usize);
+            debug_os!("val in {:x}: {:x}", i, aa);
+        }
+    }
+}
 
 impl TaskControlBlock {
     pub fn acquire_inner_lock(&self) -> MutexGuard<TaskControlBlockInner> {
-        // println!{"acquiring lock..."}
+        // debug_os!{"acquiring lock..."}
         self.inner.lock()
     }
     
@@ -210,14 +213,14 @@ impl TaskControlBlock {
                     trap_cx.x[10] = log2(signum.bits());    // a0=signum
                     trap_cx.x[1] = SIGNAL_TRAMPOLINE;       // ra-> signal_trampoline
                     trap_cx.sepc = sigaction.sa_handler;    // sepc-> sa_handler
-                    gdb_println!(SIGNAL_ENABLE, " --- {:?} (si_signo={:?}, si_code=UNKNOWN, si_addr=0x{:X})", signum, signum, sigaction.sa_handler);   
+                    debug_info!(" --- {:?} (si_signo={:?}, si_code=UNKNOWN, si_addr=0x{:X})", signum, signum, sigaction.sa_handler);   
                 }
                 inner.siginfo.is_signal_execute = true;
                 return Some((signum, sigaction.sa_handler));
             }   
             else{// check SIGTERM independently
                 if signum == Signals::SIGTERM || signum == Signals::SIGKILL{
-                    gdb_println!(SIGNAL_ENABLE, " --- {:?} (si_signo={:?}, si_code=UNKNOWN, si_addr=SIG_DFL)", signum, signum);   
+                    debug_info!(" --- {:?} (si_signo={:?}, si_code=UNKNOWN, si_addr=SIG_DFL)", signum, signum);   
                     return Some((signum, SIG_DFL));
                 }
             }
@@ -245,7 +248,7 @@ impl TaskControlBlock {
                 trap_cx.x[10] = log2(signal.bits());    // a0=signum
                 trap_cx.x[1] = SIGNAL_TRAMPOLINE;       // ra-> signal_trampoline
                 trap_cx.sepc = sigaction.sa_handler;    // sepc-> sa_handler
-                gdb_println!(SIGNAL_ENABLE, " --- {:?} (si_signo={:?}, si_code=UNKNOWN, si_addr=0x{:X})", signal, signal, sigaction.sa_handler);    
+                debug_info!(" --- {:?} (si_signo={:?}, si_code=UNKNOWN, si_addr=0x{:X})", signal, signal, sigaction.sa_handler);    
             }
             inner.siginfo.is_signal_execute = true;
             true
@@ -264,28 +267,34 @@ impl TaskControlBlock {
         let mut inner = self.acquire_inner_lock();
         for signal_pending in inner.siginfo.signal_pending.clone(){
             if signal_pending == signal{
-                gdb_println!(SIGNAL_ENABLE, " --- has signal {:?} ", signal);   
+                debug_info!(" --- has signal {:?} ", signal);   
                 return true;
             }
         }
         return false;
     }
 
-
+    //PCB生成
     pub fn new(elf_data: &[u8]) -> Self {
-        // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, user_sp, user_heap, entry_point, auxv) = MemorySet::from_elf(elf_data);
-        let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT).into())
-            .unwrap()
-            .ppn();
+       
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = pid_alloc();
         let tgid = pid_handle.0;
         let kernel_stack = KernelStack::new(&pid_handle);
         let kernel_stack_top = kernel_stack.get_top();
+        
+        // memory_set /user stack top /use heap bottom/ elf entry point
+        let (memory_set, user_sp, user_heap, mut entry_point, auxv) = MemorySet::from_elf(elf_data,tgid);
+
+        // entry_point = test_in_usr as usize; // Yan_ice: temporarily modify it to test
+
+        let trap_cx_ppn = memory_set
+            .translate(VirtAddr::from(TRAP_CONTEXT).into()).unwrap();
+
+        //Yan_ice: 这里在进程栈里给进程上下文分配了位置
         // push a task context which goes to trap_return to the top of kernel stack
         let task_cx_ptr = kernel_stack.push_on_top(TaskContext::goto_trap_return());
+
         let task_control_block = Self {
             pid: pid_handle,
             tgid,
@@ -298,9 +307,7 @@ impl TaskControlBlock {
                 trapcx_backup: TrapContext::app_init_context(
                     entry_point,
                     user_sp,
-                    KERNEL_SPACE.lock().token(),
                     kernel_stack_top,
-                    trap_handler as usize,
                 ),
                 trap_cx_ppn,
                 base_size: user_sp,
@@ -347,10 +354,11 @@ impl TaskControlBlock {
         *trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp,
-            KERNEL_SPACE.lock().token(),
             kernel_stack_top,
-            trap_handler as usize,
+            //trap_handler as usize,
+                //Yan_ice: trap_handler
         );
+
         task_control_block
     }
 
@@ -370,15 +378,14 @@ impl TaskControlBlock {
     // Due to "push" operations, we will start from the bottom
     pub fn exec(&self, elf_data: &[u8], args: Vec<String>) {
         // memory_set with elf program headers/trampoline/trap context/user stack
+        let pid = self.tgid;
+        let (memory_set, mut user_sp, user_heap, entry_point, mut auxv) = MemorySet::from_elf(elf_data,pid);
         
-        let (memory_set, mut user_sp, user_heap, entry_point, mut auxv) = MemorySet::from_elf(elf_data);
-        
-        // println!("user_sp {:X}", user_sp);
+        // debug_os!("user_sp {:X}", user_sp);
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT).into())
-            .unwrap()
-            .ppn();
-        
+            .unwrap();
+
         ////////////// envp[] ///////////////////
         let mut env: Vec<String> = Vec::new();
         env.push(String::from("SHELL=/user_shell"));
@@ -403,10 +410,10 @@ impl TaskControlBlock {
             let mut p = user_sp;
             // write chars to [user_sp, user_sp + len]
             for c in env[i].as_bytes() {
-                *translated_refmut(memory_set.token(), p as *mut u8) = *c;
+                *translated_refmut(memory_set.id(), p as *mut u8) = *c;
                 p += 1;
             }
-            *translated_refmut(memory_set.token(), p as *mut u8) = 0;
+            *translated_refmut(memory_set.id(), p as *mut u8) = 0;
         }
         // make the user_sp aligned to 8B for k210 platform
         user_sp -= user_sp % core::mem::size_of::<usize>();
@@ -417,16 +424,16 @@ impl TaskControlBlock {
         argv[args.len()] = 0;
         for i in 0..args.len() {
             user_sp -= args[i].len() + 1;
-            // println!("user_sp {:X}", user_sp);
+            // debug_os!("user_sp {:X}", user_sp);
             argv[i] = user_sp;
             let mut p = user_sp;
             // write chars to [user_sp, user_sp + len]
             for c in args[i].as_bytes() {
-                *translated_refmut(memory_set.token(), p as *mut u8) = *c;
+                *translated_refmut(memory_set.id(), p as *mut u8) = *c;
                 // print!("({})",*c as char);
                 p += 1;
             }
-            *translated_refmut(memory_set.token(), p as *mut u8) = 0;
+            *translated_refmut(memory_set.id(), p as *mut u8) = 0;
         }
         // make the user_sp aligned to 8B for k210 platform
         user_sp -= user_sp % core::mem::size_of::<usize>();
@@ -437,17 +444,17 @@ impl TaskControlBlock {
         user_sp -= user_sp % core::mem::size_of::<usize>();
         let mut p = user_sp;
         for c in platform.as_bytes() {
-            *translated_refmut(memory_set.token(), p as *mut u8) = *c;
+            *translated_refmut(memory_set.id(), p as *mut u8) = *c;
             p += 1;
         }
-        *translated_refmut(memory_set.token(), p as *mut u8) = 0;
+        *translated_refmut(memory_set.id(), p as *mut u8) = 0;
 
         ////////////// rand bytes ///////////////////
         user_sp -= 16;
         p = user_sp;
         auxv.push(AuxHeader{aux_type: AT_RANDOM, value: user_sp});
         for i in 0..0xf {
-            *translated_refmut(memory_set.token(), p as *mut u8) = i as u8;
+            *translated_refmut(memory_set.id(), p as *mut u8) = i as u8;
             p += 1;
         }
         
@@ -459,38 +466,38 @@ impl TaskControlBlock {
         auxv.push(AuxHeader{aux_type: AT_NULL, value:0});// end
         user_sp -= auxv.len() * core::mem::size_of::<AuxHeader>();
         let auxv_base = user_sp;
-        // println!("[auxv]: base 0x{:X}", auxv_base);
+        // debug_os!("[auxv]: base 0x{:X}", auxv_base);
         for i in 0..auxv.len() {
-            // println!("[auxv]: {:?}", auxv[i]);
+            // debug_os!("[auxv]: {:?}", auxv[i]);
             let addr = user_sp + core::mem::size_of::<AuxHeader>() * i;
-            *translated_refmut(memory_set.token(), addr as *mut usize) = auxv[i].aux_type ;
-            *translated_refmut(memory_set.token(), (addr + core::mem::size_of::<usize>()) as *mut usize) = auxv[i].value ;
+            *translated_refmut(memory_set.id(), addr as *mut usize) = auxv[i].aux_type ;
+            *translated_refmut(memory_set.id(), (addr + core::mem::size_of::<usize>()) as *mut usize) = auxv[i].value ;
         }
 
 
         ////////////// *envp [] //////////////////////
         user_sp -= (env.len() + 1) * core::mem::size_of::<usize>();
         let envp_base = user_sp;
-        *translated_refmut(memory_set.token(), (user_sp + core::mem::size_of::<usize>() * (env.len())) as *mut usize) = 0;
+        *translated_refmut(memory_set.id(), (user_sp + core::mem::size_of::<usize>() * (env.len())) as *mut usize) = 0;
         for i in 0..env.len() {
-            *translated_refmut(memory_set.token(), (user_sp + core::mem::size_of::<usize>() * i) as *mut usize) = envp[i] ;
+            *translated_refmut(memory_set.id(), (user_sp + core::mem::size_of::<usize>() * i) as *mut usize) = envp[i] ;
         }
         
         ////////////// *argv [] //////////////////////
         user_sp -= (args.len() + 1) * core::mem::size_of::<usize>();
         let argv_base = user_sp;
-        *translated_refmut(memory_set.token(), (user_sp + core::mem::size_of::<usize>() * (args.len())) as *mut usize) = 0;
+        *translated_refmut(memory_set.id(), (user_sp + core::mem::size_of::<usize>() * (args.len())) as *mut usize) = 0;
         for i in 0..args.len() {
-            *translated_refmut(memory_set.token(), (user_sp + core::mem::size_of::<usize>() * i) as *mut usize) = argv[i] ;
+            *translated_refmut(memory_set.id(), (user_sp + core::mem::size_of::<usize>() * i) as *mut usize) = argv[i] ;
         }
 
         ////////////// argc //////////////////////
         user_sp -= core::mem::size_of::<usize>();
-        *translated_refmut(memory_set.token(), user_sp as *mut usize) = args.len();
+        *translated_refmut(memory_set.id(), user_sp as *mut usize) = args.len();
 
 
         // **** hold current PCB lock
-        // println!{"--------------------pin15"}
+        // debug_os!{"--------------------pin15"}
         let mut inner = self.acquire_inner_lock();
         // substitute memory_set
         // QUES
@@ -498,7 +505,7 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         inner.heap_start = user_heap;
         inner.heap_pt = user_heap;
-        // println!("The heap start is {}", user_heap);
+        // debug_os!("The heap start is {}", user_heap);
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
 
@@ -510,40 +517,29 @@ impl TaskControlBlock {
             ).take();
 
         // initialize trap_cx
-        // println!("[exec] entry point = 0x{:X}", entry_point);
+        // debug_os!("[exec] entry point = 0x{:X}", entry_point);
         
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp,
-            KERNEL_SPACE.lock().token(),
             self.kernel_stack.get_top(),
-            trap_handler as usize,
+            //trap_handler as usize,
+            //Yan_ice: trap_handler
         );
+        debug_info!("ret address: {:x}", trap_cx.sepc);
         trap_cx.x[10] = args.len();
         trap_cx.x[11] = argv_base;
         trap_cx.x[12] = envp_base;
         trap_cx.x[13] = auxv_base;
         *inner.get_trap_cx() = trap_cx;
-        // gdb_println!(EXEC_ENABLE,"[exec] finish");
+        // debug_info!(EXEC_ENABLE,"[exec] finish");
         // **** release current PCB lock
     }
     
     pub fn fork(self: &Arc<TaskControlBlock>, is_create_thread: bool) -> Arc<TaskControlBlock> {
         // ---- hold parent PCB lock
         let mut parent_inner = self.acquire_inner_lock();
-        // println!{"trap context of pid{}: {:X}", self.pid.0, parent_inner.trap_cx_ppn.0}
-        parent_inner.print_cx();
-        // let user_heap_top = parent_inner.heap_start + USER_HEAP_SIZE;
-        let user_heap_base = parent_inner.heap_start;
-        // copy user space(include trap context)
-        let memory_set = MemorySet::from_copy_on_write(
-            &mut parent_inner.memory_set,
-            user_heap_base,
-        );
-        let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT).into())
-            .unwrap()
-            .ppn();
+        
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = pid_alloc();
         let mut tgid = 0;
@@ -553,6 +549,18 @@ impl TaskControlBlock {
         else{
             tgid = pid_handle.0;
         }
+        
+        // let user_heap_top = parent_inner.heap_start + USER_HEAP_SIZE;
+        let user_heap_base = parent_inner.heap_start;
+        // copy user space(include trap context)
+        let memory_set = MemorySet::from_copy_on_write(
+            &mut parent_inner.memory_set,
+            user_heap_base,
+            tgid
+        );
+
+        let trap_cx_ppn = nkapi_translate(memory_set.id(), VirtAddr::from(TRAP_CONTEXT).into(), false);
+        
         let kernel_stack = KernelStack::new(&pid_handle);
         let kernel_stack_top = kernel_stack.get_top();
         // push a goto_trap_return task_cx on the top of kernel stack
@@ -566,7 +574,7 @@ impl TaskControlBlock {
                 new_fd_table.push(None);
             }
         }
-        //println!("fork: parent_inner.current_inode = {}",parent_inner.current_inode);
+        //debug_os!("fork: parent_inner.current_inode = {}",parent_inner.current_inode);
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
             tgid,
@@ -577,7 +585,7 @@ impl TaskControlBlock {
                 itimer: ITimerVal::new(),
                 siginfo: parent_inner.siginfo.clone(),
                 trapcx_backup: parent_inner.get_trap_cx().clone(),
-                trap_cx_ppn,
+                trap_cx_ppn: trap_cx_ppn.unwrap(),
                 base_size: parent_inner.base_size,
                 heap_start: parent_inner.heap_start,
                 heap_pt: parent_inner.heap_pt,
@@ -593,13 +601,12 @@ impl TaskControlBlock {
                 resource_list: parent_inner.resource_list.clone(),
             }),
         });
-        // println!("[fork] parent_inner.siginfo {:?}",parent_inner.siginfo);
+        // debug_os!("[fork] parent_inner.siginfo {:?}",parent_inner.siginfo);
         // add child
         parent_inner.children.push(task_control_block.clone());
         // modify kernel_sp in trap_cx
         // **** acquire child PCB lock
         let trap_cx = task_control_block.acquire_inner_lock().get_trap_cx();
-        task_control_block.acquire_inner_lock().print_cx();
         // **** release child PCB lock
         trap_cx.kernel_sp = kernel_stack_top;
         // return
@@ -615,6 +622,7 @@ impl TaskControlBlock {
         self.tgid
     }
     
+    //used to solve page fault
     pub fn check_lazy(&self, va: VirtAddr, is_load: bool) -> isize {
         let vpn: VirtPageNum = va.floor();
         //unsafe {
@@ -636,77 +644,80 @@ impl TaskControlBlock {
         let mmap_start = self.acquire_inner_lock().mmap_area.mmap_start;
         let mmap_end = self.acquire_inner_lock().mmap_area.mmap_top;
         
-        //println!("get the lock successfully");
+        //debug_os!("get the lock successfully");
         if va >= mmap_start && va < mmap_end {
         // if false { // disable lazy mmap
-            //println!("lazy mmap");
+            debug_os!("lazy mmap");
             self.lazy_mmap(va.0, is_load)
         } else if va.0 >= heap_base && va.0 <= heap_pt {
+            debug_os!("lazy heap");
             self.acquire_inner_lock().lazy_alloc_heap(vpn);
-            return 0;
+            0
         } else if va.0 >= stack_bottom && va.0 <= stack_top {
-            //println!{"lazy_stack_page: {:?}", va}
+            debug_os!{"lazy_stack_page: {:?}", va}
             self.acquire_inner_lock().lazy_alloc_stack(vpn);
             0
         } else {
+            //Yan_ice: manage CoW
             // get the PageTableEntry that faults
-            let pte = self.acquire_inner_lock().enquire_vpn(vpn);
-            // if the virtPage is a CoW
-            if pte.is_some() && pte.unwrap().is_cow() {
-                let former_ppn = pte.unwrap().ppn();
-                self.acquire_inner_lock().cow_alloc(vpn, former_ppn);
-                0
-            } else {
-                -1
+            if let Some(pte) = nkapi_get_pte(self.getpid(), vpn) {
+                if pte.is_cow() && !is_load {
+                    //debug_info!("ready copy on write.");
+                    nkapi_translate(self.getpid(), vpn, true);
+                    return 0;
+                }
             }
+            -1
         }
         //}
     }
 
     pub fn lazy_mmap(&self, stval: usize, is_load: bool) -> isize {
-        // println!("lazy_mmap");
+        // debug_os!("lazy_mmap");
         let mut inner = self.acquire_inner_lock();
         let fd_table = inner.fd_table.clone();
-        let token = inner.get_user_token();
+        let pt_id = inner.get_user_id();
         let lazy_result = inner.memory_set.lazy_mmap(stval.into());
 
         if lazy_result == 0 || is_load {
-            inner.mmap_area.lazy_map_page(stval, fd_table, token);
+            inner.mmap_area.lazy_map_page(stval, fd_table, pt_id);
         }
-        // println!("lazy_mmap");
+        // debug_os!("lazy_mmap");
         return lazy_result;
     }
 
     pub fn mmap(&self, start: usize, len: usize, prot: usize, flags: usize, fd: isize, off: usize) -> usize {
-        // gdb_println!(SYSCALL_ENABLE,"[mmap](0x{:X},{},{},0x{:X},{},{})",start, len, prot, flags, fd, off);
+        // debug_info!(SYSCALL_ENABLE,"[mmap](0x{:X},{},{},0x{:X},{},{})",start, len, prot, flags, fd, off);
         
         if start % PAGE_SIZE != 0{
             panic!("mmap: start_va not aligned");
         } 
         let mut inner = self.acquire_inner_lock();
         let fd_table = inner.fd_table.clone();
-        let token = inner.get_user_token();
+        let pt_id = inner.get_user_id();
         let mut va_top = inner.mmap_area.get_mmap_top();
         let mut end_va = VirtAddr::from(va_top.0 + len);
         // "prot<<1" is equal to  meaning of "MapPermission"
-        let map_flags = (((prot & 0b111)<<1) + (1<<4))  as u8; // "1<<4" means user
+        let map_flags = (((prot & 0b111)<<1) + (1<<4))  as u16; // "1<<4" means user
     
         let mut startvpn = start/PAGE_SIZE;
         
         if start != 0 { // "Start" va Already mapped
-            while startvpn < (start+len)/PAGE_SIZE {
-                if inner.memory_set.set_pte_flags(startvpn.into(), map_flags as usize) == -1{
-                    panic!("mmap: start_va not mmaped");
-                }
-                startvpn +=1;
-            }
+            debug_info!("WARN: case start already mapped (TODO)");
+            // while startvpn < (start+len)/PAGE_SIZE {
+            //     nkapi_mmap(pt_id, VirtPageNum{0:startvpn}, ppn, perm);
+            //     if inner.memory_set.set_pte_flags(startvpn.into(), map_flags as usize) == -1{
+            //         panic!("mmap: start_va not mmaped");
+            //     }
+            //     startvpn +=1;
+            // }
             return start;
         }
         else{ // "Start" va not mapped
             //inner.memory_set.insert_kernel_mmap_area(va_top, end_va, MapPermission::from_bits(map_flags).unwrap());
             inner.memory_set.insert_mmap_area(va_top, end_va, MapPermission::from_bits(map_flags).unwrap());
             //inner.mmap_area.push_kernel(va_top.0, len, prot, flags, fd, off, fd_table, token);
-            inner.mmap_area.push(va_top.0, len, prot, flags, fd, off, fd_table, token);
+            inner.mmap_area.push(va_top.0, len, prot, flags, fd, off, fd_table,pt_id);
             va_top.0
         }
     }
@@ -717,15 +728,16 @@ impl TaskControlBlock {
         inner.mmap_area.remove(start, len)
     }
 
+    //Yan_ice: TODO: remove KERNEL_SPACE and KERNEL_MMAP_AREA
 
     // create mmap in kernel space, used for elf file only
     pub fn kmmap(&self, start: usize, len: usize, prot: usize, flags: usize, fd: isize, off: usize) -> usize {
-        gdb_println!(SYSCALL_ENABLE,"kmap(0x{:X},{},{},{},{},{})",start, len, prot, flags, fd, off);
+        debug_info!("kmap(0x{:X},{},{},{},{},{})",start, len, prot, flags, fd, off);
         let mut ks_lock = KERNEL_SPACE.lock();
         let mut kma_lock = KERNEL_MMAP_AREA.lock();
         let mut inner = self.acquire_inner_lock();
         let fd_table = inner.fd_table.clone();
-        let token = ks_lock.token();
+        let token = ks_lock.id();
         let va_top = kma_lock.get_mmap_top();
         let end_va = VirtAddr::from(va_top.0 + len);
         ks_lock.insert_kernel_mmap_area(va_top, end_va,  MapPermission::W | MapPermission::R );
@@ -770,5 +782,5 @@ pub enum TaskStatus {
 #[inline(never)]
 #[no_mangle]
 pub fn point(){
-    println!("hi");
+    debug_os!("hi");
 }

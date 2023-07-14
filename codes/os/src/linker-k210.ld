@@ -1,21 +1,15 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
-BASE_ADDRESS = 0x80020000;
+BASE_ADDRESS = 0x80200000;
 
 SECTIONS
 {
     . = BASE_ADDRESS;
-    skernel = .;
+    sokernel = .;
 
     stext = .;
     .text : {
         *(.text.entry)
-        . = ALIGN(4K);
-        strampoline = .;
-        *(.text.trampoline);
-        . = ALIGN(4K);
-        ssignaltrampoline = .;
-        *(.text.signaltrampoline);
         . = ALIGN(4K);
         *(.text .text.*)
     }
@@ -45,7 +39,7 @@ SECTIONS
 
     . = ALIGN(4K);
     ebss = .;
-    ekernel = .;
+    eokernel = .;
 
     /DISCARD/ : {
         *(.eh_frame)

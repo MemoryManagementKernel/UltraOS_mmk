@@ -3,7 +3,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spin::Mutex;
 use lazy_static::*;
-use super::processor::*;
+
 
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
@@ -26,21 +26,31 @@ lazy_static! {
     pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 }
 
+
+
 pub fn add_task(task: Arc<TaskControlBlock>) {
-    TASK_MANAGER.lock().add(task);
+    unsafe{
+        TASK_MANAGER.lock().add(task);
+    }
+    
 }
 
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
-    // println!("core{}:fetch task",get_core_id());
-    TASK_MANAGER.lock().fetch()
+    unsafe{
+        TASK_MANAGER.lock().fetch()
+    }
+    // debug_os!("core{}:fetch task",get_core_id());
 }
 
 pub fn find_task(pid:usize)->Option<Arc<TaskControlBlock>>{
-    let inner = TASK_MANAGER.lock();
-    for task in &inner.ready_queue {
-        if task.pid.0 == pid {
-            return Some(task.clone())
+    unsafe{
+        let inner = TASK_MANAGER.lock();
+        for task in &inner.ready_queue {
+            if task.pid.0 == pid {
+                return Some(task.clone())
+            }
         }
+        return None
     }
-    return None
+    
 }

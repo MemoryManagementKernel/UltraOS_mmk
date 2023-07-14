@@ -1,5 +1,5 @@
 use crate::fs::File;
-use crate::mm::UserBuffer;
+use crate::util::mm_util::UserBuffer;
 
 pub struct NullZero {
     is_null:bool

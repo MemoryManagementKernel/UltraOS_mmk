@@ -1,4 +1,3 @@
-use riscv::register::time;
 use crate::sbi::set_timer;
 use crate::config::CLOCK_FREQ;
 use crate::task::TimeVal;
@@ -9,14 +8,7 @@ pub const USEC_PER_SEC: usize = 1000_000;
 pub const NSEC_PER_SEC: usize = 1000_000_000;
 
 pub fn get_time() -> usize {
-    let mut time:usize = 0;
-    unsafe{
-        asm!(
-            "rdtime a0",
-            inout("a0") time
-        );
-    }
-    time
+    return crate::nkapi_time();
 }
 
 pub fn get_timeval() -> TimeVal {
