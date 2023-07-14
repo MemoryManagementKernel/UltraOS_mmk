@@ -17,7 +17,7 @@ env:
 	rustup override set nightly-2023-06-25
 	(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
 	rustup component add rust-src
-	rustup component add llvm-tools-preview200
+	rustup component add llvm-tools-preview
 
 $(PAYLOAD_BIN): kernel
 	@$(OBJCOPY) $(PAYLOAD_ELF) --strip-all -O binary $@
