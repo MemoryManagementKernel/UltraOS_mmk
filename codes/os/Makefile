@@ -1,5 +1,5 @@
 # Building
-PAYLOAD_ELF := target/$(TARGET)/$(MODE)/UltraOS_mmk
+PAYLOAD_ELF := target/$(TARGET)/$(MODE)/UltraOS
 PAYLOAD_BIN := $(PAYLOAD_ELF)_$(BOARD).bin
 
 # Binutils
