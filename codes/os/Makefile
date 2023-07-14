@@ -1,6 +1,6 @@
 # Building
 PAYLOAD_ELF := target/$(TARGET)/$(MODE)/UltraOS
-PAYLOAD_BIN := $(PAYLOAD_ELF)_$(BOARD).bin
+PAYLOAD_BIN := $(PAYLOAD_ELF).bin
 
 # Binutils
 OBJDUMP := rust-objdump --arch-name=riscv64
