@@ -845,6 +845,9 @@ pub fn main() -> i32 {
     loop {
         // println!{"<<<<<<<<<entering the loop of input"}
         let c = getchar();
+        if c==255 {
+        	continue;
+        }
         let is_exec = shellmachine.operate(c as char);
         if is_exec {
             line = String::from(shellmachine.get_cmd());
