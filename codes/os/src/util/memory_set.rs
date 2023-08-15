@@ -56,6 +56,14 @@ impl MemorySet {
     }
     pub fn new_bare(id: usize) -> Self {
         nkapi_pt_init(id, true);
+
+        //Map MMIO here.
+        for pair in MMIO {
+            let page_num = pair.0 / PAGE_SIZE;
+            nkapi_alloc(id, page_num.into(), MapType::Identical, 
+                MapPermission::R | MapPermission::W);
+        }
+
         Self {
             id,
             //page_table: PageTable::new(id),
@@ -774,7 +782,7 @@ impl MapArea {
 
             start += PAGE_SIZE - page_offset;
             
-            nkapi_copyTo(pt_handle, current_vpn, data_buf, offset);
+            nkapi_write(pt_handle, current_vpn, data_buf, 0, offset);
 
             page_offset = 0;
             if start >= len {

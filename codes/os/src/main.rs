@@ -6,12 +6,12 @@
 #![feature(alloc_error_handler)]
 
 extern crate alloc;
+#[macro_use]
+extern crate mmi;
 
 #[macro_use]
 extern crate bitflags;
 
-#[macro_use]
-mod mmi;
 mod lang_items;
 mod fs;
 mod console;
@@ -82,12 +82,17 @@ extern "C"{
     fn eokernel();
 }
 
+fn kernel_handler_delegate(){
+
+}
 #[no_mangle]
 pub fn outer_kernel_init(){
     debug_os!("Outer Kernel init.");
     
     //temoraily have to add to make program run. only for test.
-    nkapi_set_delegate_handler(os_trap::trap_handler_delegate as usize);
+    nkapi_set_kernel_delegate_handler(kernel_handler_delegate as usize);
+    
+    nkapi_set_user_delegate_handler(os_trap::trap_handler_delegate as usize);
     nkapi_set_signal_handler(crate::task::perform_signal_handler as usize);
     nkapi_set_allocator_range(eokernel as usize, OKSPACE_END);
     debug_os!("UltraOS: Config success.");
