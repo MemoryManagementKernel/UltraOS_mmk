@@ -4,7 +4,7 @@ use crate::sbi::console_getchar;
 use crate::task::suspend_current_and_run_next;
 use lazy_static::*;
 use spin::Mutex;
-use crate::{debug_os, debug_info};
+use crate::print;
 //use crate::task::get_core_id;
 
 
@@ -85,7 +85,7 @@ impl File for Stdout {
     fn write(&self, user_buf: UserBuffer) -> usize {
         let lock = STDOUTLOCK.lock();
         for buffer in user_buf.buffers.iter() {
-            debug_info!("{}", core::str::from_utf8(*buffer).unwrap());
+            print!("{}", core::str::from_utf8(*buffer).unwrap());
         }
         user_buf.len()
     }

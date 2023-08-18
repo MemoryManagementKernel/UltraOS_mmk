@@ -13,7 +13,6 @@ impl Write for Stdout {
 }
 
 pub fn print(args: fmt::Arguments) {
-
     //here accessible
     Stdout.write_fmt(args).unwrap();
 }
