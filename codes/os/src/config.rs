@@ -27,7 +27,7 @@ pub const SIGNAL_STACK_SIZE: usize = PAGE_SIZE;
  pub const TRAMPOLINE: usize = usize::MAX - 2*PAGE_SIZE + 1;
  pub const PROXY_CONTEXT: usize = usize::MAX - 3*PAGE_SIZE + 1;
  
- pub const SIGNAL_TRAMPOLINE: usize = 0x80000000 - PAGE_SIZE;
+ pub const SIGNAL_TRAMPOLINE: usize = 0x100000000 - PAGE_SIZE;
  pub const TRAP_CONTEXT: usize = SIGNAL_TRAMPOLINE - PAGE_SIZE;
  pub const USER_STACK: usize = TRAP_CONTEXT - PAGE_SIZE;
 
