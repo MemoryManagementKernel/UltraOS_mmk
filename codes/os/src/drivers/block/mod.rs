@@ -1,5 +1,5 @@
 mod virtio_blk;
-mod sdcard;
+//mod sdcard;
 use crate::debug_os;
 use lazy_static::*;
 use alloc::sync::Arc;

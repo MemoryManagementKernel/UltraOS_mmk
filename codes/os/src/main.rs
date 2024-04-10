@@ -94,7 +94,8 @@ pub fn outer_kernel_init(){
     
     nkapi_set_user_delegate_handler(os_trap::trap_handler_delegate as usize);
     nkapi_set_signal_handler(crate::task::perform_signal_handler as usize);
-    nkapi_set_allocator_range(eokernel as usize, OKSPACE_END);
+    nkapi_set_allocator_start(eokernel as usize);
+    nkapi_set_allocator_end(OKSPACE_END);
     debug_os!("UltraOS: Config success.");
     init_heap();
     debug_os!("Heap init success.");

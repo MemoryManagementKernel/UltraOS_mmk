@@ -2,17 +2,18 @@
 #![allow(non_camel_case_types)]
 #![allow(unused)]
 
-use k210_pac::{Peripherals, SPI0};
-use k210_hal::prelude::*;
-use k210_soc::{
-    //dmac::{dma_channel, DMAC, DMACExt},
-    gpio,
-    gpiohs,
-    spi::{aitm, frame_format, tmod, work_mode, SPI, SPIExt, SPIImpl},
-    fpioa::{self, io},
-    sysctl,
-    sleep::usleep,
-};
+// use k210_pac::{Peripherals, SPI0};
+// use k210_hal::prelude::*;
+// use k210_soc::{
+//     //dmac::{dma_channel, DMAC, DMACExt},
+//     gpio,
+//     gpiohs,
+//     spi::{aitm, frame_format, tmod, work_mode, SPI, SPIExt, SPIImpl},
+//     fpioa::{self, io},
+//     sysctl,
+//     sleep::usleep,
+// };
+
 use spin::Mutex;
 use lazy_static::*;
 use crate::{println, timer::get_time};

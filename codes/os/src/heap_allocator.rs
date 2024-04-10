@@ -14,7 +14,6 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
 }
 
 pub fn init_heap() {
-
     unsafe {
         HEAP_ALLOCATOR
             .lock()

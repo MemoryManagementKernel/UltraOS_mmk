@@ -149,7 +149,7 @@ impl Processor {
                     drop(task_inner);
                     self.inner.borrow_mut().current = Some(task);
                     nkapi_activate(id); 
-                    //debug_os!("ready switch.");  
+                    debug_os!("ready switch: {:?} {:?}",idle_task_cx_ptr2, next_task_cx_ptr2);  
                     unsafe {
                         __switch(
                             idle_task_cx_ptr2, // 这个值是taskcontext的指针，都是用汇编改的，相当于栈顶，以后所有的schedule都是调这个，两个栈切来切去
